@@ -1,8 +1,6 @@
 {
-  "name": "Remix DriveGuard Kiosk",
-  "description": "A secure driving interface featuring customizable apps, wallpaper, and intelligent sensor-based traffic safety alerts for speed bumps and signals.",
+  "name": "Drive Safe",
+  "description": "Smart vehicle kiosk launcher with speed bump & traffic signal alerts, sensor-based bump verification, daily run tracking, and service countdown.",
   "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
