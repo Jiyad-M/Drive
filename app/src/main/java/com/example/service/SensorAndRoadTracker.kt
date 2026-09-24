@@ -5,7 +5,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.location.Location
 import android.util.Log
 import com.example.data.db.RoadObstacleDao
 import com.example.data.model.RoadObstacleEntity
@@ -44,10 +43,30 @@ class SensorAndRoadTracker(
     private var hasGravity = false
     private var hasGeomagnetic = false
 
-    // Bump verification tracking
+    // Bump & Road verification tracking
     private var activeVerifyingObstacleId: String? = null
-    private var verifiedVerticalSpikeInWindow = false
+    private var verifiedLiftInWindow = false
+    private var verifiedJerkInWindow = false
+    private var verifiedSlowdownInWindow = false
     private var lastSpikeTimestamp = 0L
+
+    // Accelerometer differential tracking (Jerk & Pothole/Gutter dip)
+    private var lastAccelMagnitude = 9.8f
+    private var lastAccelZ = 9.8f
+    private var lastSensorTimestampNanos = 0L
+    private var lastGutterDipTimestamp = 0L
+
+    // Speed history for deceleration tracking (last 3.5 seconds)
+    private val recentSpeedHistory = mutableListOf<Pair<Long, Float>>()
+    // Locations where vehicle slowed down (lat, lon, count)
+    private val slowdownLocationMap = mutableListOf<SlowdownHotspot>()
+
+    data class SlowdownHotspot(
+        val lat: Double,
+        val lon: Double,
+        var count: Int,
+        var lastTime: Long
+    )
 
     // Distance & Odometer Tracking
     private var lastLocationLat: Double? = null
@@ -62,7 +81,7 @@ class SensorAndRoadTracker(
     // Sensitivity & Configuration
     var bumpSensitivityThreshold: Float = 14.0f // m/s^2 vertical/total magnitude spike
     var soundEnabled: Boolean = true
-    var fakeBumpStrikeLimit: Int = 2
+    var fakeBumpStrikeLimit: Int = 1 // Quick suppression of fake map bumps
     var isSimulating: Boolean = false
 
     // Cache of active obstacles in memory for fast distance calculations
@@ -100,23 +119,51 @@ class SensorAndRoadTracker(
                 System.arraycopy(event.values, 0, gravityValues, 0, 3)
                 hasGravity = true
 
-                // Calculate vertical / jerk magnitude
+                val now = System.currentTimeMillis()
                 val x = event.values[0]
                 val y = event.values[1]
                 val z = event.values[2]
                 val magnitude = sqrt(x * x + y * y + z * z)
 
-                // Detect sudden upward movement (either Z axis spike or deviation from 9.8m/s^2)
-                val isUpwardSpike = (magnitude > bumpSensitivityThreshold) || (z > bumpSensitivityThreshold)
+                // Jerk calculation (rate of change of acceleration)
+                val dt = if (lastSensorTimestampNanos > 0) {
+                    (event.timestamp - lastSensorTimestampNanos) / 1_000_000_000f
+                } else 0.05f
+
+                val jerk = if (dt > 0.005f) {
+                    abs(magnitude - lastAccelMagnitude) / dt
+                } else 0f
+
+                lastAccelMagnitude = magnitude
+                lastAccelZ = z
+                lastSensorTimestampNanos = event.timestamp
 
                 _telemetry.update { current ->
                     current.copy(verticalAccel = magnitude)
                 }
 
-                if (isUpwardSpike) {
-                    onVerticalBumpSpikeDetected(magnitude)
+                // 1. Detect BIG GUTTER (Pothole / Road Drain):
+                // Sudden downward drop (z < 5.8 m/s²) followed within 400ms by rebound impact jerk
+                if (z < 5.8f) {
+                    lastGutterDipTimestamp = now
+                } else if (now - lastGutterDipTimestamp in 50..400 && (z > 13.5f || jerk > 35f)) {
+                    lastGutterDipTimestamp = 0L
+                    onBigGutterDetected(magnitude)
+                }
+
+                // 2. Detect LIFT (upward vertical spike on Z axis)
+                val isUpwardLift = (magnitude > bumpSensitivityThreshold) || (z > bumpSensitivityThreshold)
+                if (isUpwardLift) {
+                    onVerticalBumpSpikeDetected(magnitude, isJerk = false)
+                }
+
+                // 3. Detect JERKING (suspension oscillation / rough bump crossing)
+                val isJerking = jerk > 30f && (magnitude > 12.0f || z > 12.0f)
+                if (isJerking && !isUpwardLift) {
+                    onVerticalBumpSpikeDetected(magnitude, isJerk = true)
                 }
             }
+
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(event.values, 0, geomagneticValues, 0, 3)
                 hasGeomagnetic = true
@@ -129,7 +176,6 @@ class SensorAndRoadTracker(
             if (SensorManager.getRotationMatrix(r, i, gravityValues, geomagneticValues)) {
                 val orientation = FloatArray(3)
                 SensorManager.getOrientation(r, orientation)
-                // Azimuth in degrees [0, 360)
                 var degrees = Math.toDegrees(orientation[0].toDouble()).toFloat()
                 if (degrees < 0) degrees += 360f
 
@@ -147,14 +193,59 @@ class SensorAndRoadTracker(
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     /**
-     * Called whenever a physical or simulated bump spike occurs
+     * Requirement: Big gutter single beep
+     * Auto-detect and store real road gutters/potholes in the database
      */
-    fun onVerticalBumpSpikeDetected(magnitude: Float) {
+    fun onBigGutterDetected(magnitude: Float) {
         val now = System.currentTimeMillis()
-        if (now - lastSpikeTimestamp < 800L) return // Debounce quick spikes
+        if (now - lastSpikeTimestamp < 1000L) return
         lastSpikeTimestamp = now
 
-        verifiedVerticalSpikeInWindow = true
+        val currentTelemetry = _telemetry.value
+        val speedKmH = currentTelemetry.currentSpeedKmH
+        val lat = currentTelemetry.latitude
+        val lon = currentTelemetry.longitude
+
+        if ((speedKmH >= 8f || isSimulating) && lat != 0.0 && lon != 0.0) {
+            val existingNearby = cachedObstacles.any { obs ->
+                obs.type == "BIG_GUTTER" && calculateDistanceMeters(lat, lon, obs.latitude, obs.longitude) < 25.0
+            }
+
+            if (!existingNearby) {
+                val newGutter = RoadObstacleEntity(
+                    id = "gutter_${System.currentTimeMillis()}",
+                    type = "BIG_GUTTER",
+                    latitude = lat,
+                    longitude = lon,
+                    heading = currentTelemetry.compassDegrees,
+                    title = "Road Gutter / Pothole",
+                    isAutoDetected = true,
+                    isConfirmedReal = true,
+                    sensorHitCount = 1
+                )
+                scope.launch {
+                    obstacleDao.insertObstacle(newGutter)
+                    // Big Gutter: 1 single beep
+                    audioAlertManager.playGutterAlert(newGutter.id, soundEnabled)
+                }
+            }
+        }
+    }
+
+    /**
+     * Requirement: "3 time slow down vehcle or a lift or jurking add a bumb.
+     * Store on data base for real road situation."
+     */
+    fun onVerticalBumpSpikeDetected(magnitude: Float, isJerk: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (now - lastSpikeTimestamp < 800L) return
+        lastSpikeTimestamp = now
+
+        if (isJerk) {
+            verifiedJerkInWindow = true
+        } else {
+            verifiedLiftInWindow = true
+        }
 
         val currentTelemetry = _telemetry.value
         val speedKmH = currentTelemetry.currentSpeedKmH
@@ -162,39 +253,108 @@ class SensorAndRoadTracker(
         val lon = currentTelemetry.longitude
         val heading = currentTelemetry.compassDegrees
 
-        Log.d(TAG, "Vertical bump spike detected: $magnitude m/s², speed: $speedKmH km/h")
+        Log.d(TAG, "Bump sensor reaction detected (Lift: ${!isJerk}, Jerk: $isJerk, mag: $magnitude m/s², speed: $speedKmH)")
 
-        // User requirement: "also add bumbs withv up movement of car(Use gps, acclamatory censer, compass )"
-        // Condition: Vehicle must be in motion (> 10 km/h or simulation mode) and valid GPS
-        if ((speedKmH >= 10f || isSimulating) && lat != 0.0 && lon != 0.0) {
-            // Check if there is already a registered bump within 25 meters
-            val existingNearby = cachedObstacles.any { obs ->
-                obs.type == "SPEED_BUMP" && calculateDistanceMeters(lat, lon, obs.latitude, obs.longitude) < 25.0
+        if ((speedKmH >= 8f || isSimulating) && lat != 0.0 && lon != 0.0) {
+            // Find if there is an existing obstacle within 25 meters
+            val existing = cachedObstacles.firstOrNull { obs ->
+                calculateDistanceMeters(lat, lon, obs.latitude, obs.longitude) < 25.0
             }
 
-            if (!existingNearby) {
-                // Auto-add new speed bump detected by car's upward movement
+            if (existing != null) {
+                // Confirm existing bump or promote it to real
+                val updatedHitCount = existing.sensorHitCount + 1
+                val confirmed = existing.copy(
+                    isConfirmedReal = true,
+                    isSuppressedFake = false,
+                    strikeCount = 0,
+                    sensorHitCount = updatedHitCount
+                )
+                scope.launch {
+                    obstacleDao.insertObstacle(confirmed)
+                }
+            } else {
+                // Add confirmed real speed bump based on physical lift or jerk
                 val newBump = RoadObstacleEntity(
                     id = "auto_bump_${System.currentTimeMillis()}",
                     type = "SPEED_BUMP",
                     latitude = lat,
                     longitude = lon,
                     heading = heading,
-                    title = "Sensor-Detected Bump (${currentTelemetry.compassCardinal} $heading°)",
+                    title = "Verified Speed Bump",
                     isAutoDetected = true,
-                    strikeCount = 0,
-                    isSuppressedFake = false
+                    isConfirmedReal = true,
+                    sensorHitCount = 1
                 )
                 scope.launch {
                     obstacleDao.insertObstacle(newBump)
-                    audioAlertManager.playNewBumpDetectedChime()
                 }
 
                 _telemetry.update { current ->
                     current.copy(
                         lastDetectedBumpTime = now,
-                        alertStatusMessage = "Bump Auto-Logged via Accelerometer & Compass!"
+                        alertStatusMessage = "Verified Bump Added to Database"
                     )
+                }
+            }
+        }
+    }
+
+    /**
+     * Requirement: "3 time slow down vehcle or a lift or jurking add a bumb."
+     * Track vehicle deceleration / slowdowns
+     */
+    private fun trackVehicleSlowdown(lat: Double, lon: Double, currentSpeedKmH: Float) {
+        val now = System.currentTimeMillis()
+        recentSpeedHistory.add(now to currentSpeedKmH)
+        val cutoff = now - 3500L
+        recentSpeedHistory.removeAll { it.first < cutoff }
+
+        if (recentSpeedHistory.size >= 4) {
+            val maxRecent = recentSpeedHistory.maxOf { it.second }
+            val speedDrop = maxRecent - currentSpeedKmH
+
+            // If vehicle dropped speed significantly (>= 7 km/h) approaching this spot
+            if (speedDrop >= 7.0f && currentSpeedKmH in 8.0f..35.0f) {
+                verifiedSlowdownInWindow = true
+
+                // Check slowdown hotspot map
+                var hotspot = slowdownLocationMap.firstOrNull {
+                    calculateDistanceMeters(lat, lon, it.lat, it.lon) < 25.0
+                }
+
+                if (hotspot == null) {
+                    hotspot = SlowdownHotspot(lat, lon, 1, now)
+                    slowdownLocationMap.add(hotspot)
+                } else if (now - hotspot.lastTime > 15_000L) {
+                    // Count unique slowdown event (at least 15s between passes)
+                    hotspot.count++
+                    hotspot.lastTime = now
+
+                    // Requirement: "3 time slow down vehcle ... add a bumb"
+                    if (hotspot.count >= 3) {
+                        val existingNearby = cachedObstacles.any { obs ->
+                            calculateDistanceMeters(lat, lon, obs.latitude, obs.longitude) < 25.0
+                        }
+
+                        if (!existingNearby) {
+                            Log.i(TAG, "3rd Slowdown detected at location -> Auto-registering real Speed Bump!")
+                            val newBump = RoadObstacleEntity(
+                                id = "slowdown_bump_${System.currentTimeMillis()}",
+                                type = "SPEED_BUMP",
+                                latitude = lat,
+                                longitude = lon,
+                                heading = _telemetry.value.compassDegrees,
+                                title = "Verified Speed Bump (3x Slowdown)",
+                                isAutoDetected = true,
+                                isConfirmedReal = true,
+                                sensorHitCount = 3
+                            )
+                            scope.launch {
+                                obstacleDao.insertObstacle(newBump)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -206,20 +366,24 @@ class SensorAndRoadTracker(
     fun onLocationUpdate(lat: Double, lon: Double, speedMps: Float, bearing: Float = 0f) {
         val speedKmH = speedMps * 3.6f
 
-        // Requirement: "If slow speed alert befor 50m incrase with speed of gehcle."
-        // Base alert distance: 50m for slow speed (<= 30 km/h).
-        // For higher speed, reaction distance scales: 50m + (speedKmH - 30) * 1.5m
+        // Track vehicle slowdown patterns
+        trackVehicleSlowdown(lat, lon, speedKmH)
+
+        // Dynamic Alert Distance: 50m for slow speed, scaling up with velocity
         val dynamicAlertDistance = if (speedKmH <= 30f) {
             50.0
         } else {
             50.0 + (speedKmH - 30.0) * 1.5
         }
 
-        // Find nearest active obstacle
+        // Filter valid obstacles:
+        // Do NOT alert if suppressed fake!
+        val activeCandidates = cachedObstacles.filter { !it.isSuppressedFake }
+
         var nearest: RoadObstacleEntity? = null
         var minDistance = Double.MAX_VALUE
 
-        for (obs in cachedObstacles) {
+        for (obs in activeCandidates) {
             val dist = calculateDistanceMeters(lat, lon, obs.latitude, obs.longitude)
             if (dist < minDistance) {
                 minDistance = dist
@@ -232,31 +396,41 @@ class SensorAndRoadTracker(
 
         var isApproachingBump = false
         var isApproachingSignal = false
+        var isApproachingGutter = false
         var statusMsg = "Road Clear - Normal Speed"
 
         if (hasNearest && isInsideAlertZone && nearest != null) {
-            if (nearest.type == "SPEED_BUMP") {
-                isApproachingBump = true
-                statusMsg = "ATTENTION: Speed Bump ahead in ${minDistance.toInt()}m!"
-                // Trigger 3-beep alert for bump
-                audioAlertManager.playSpeedBumpAlert(nearest.id, soundEnabled)
+            when (nearest.type) {
+                "BIG_GUTTER" -> {
+                    isApproachingGutter = true
+                    statusMsg = "CAUTION: Big Gutter / Pothole ahead (${minDistance.toInt()}m)!"
+                    // Requirement: Big gutter single beep
+                    audioAlertManager.playGutterAlert(nearest.id, soundEnabled)
+                    checkFakeBumpCrossing(nearest, minDistance)
+                }
 
-                // Track bump crossing window for fake bump detection
-                checkFakeBumpCrossing(nearest, minDistance)
-            } else if (nearest.type == "TRAFFIC_SIGNAL") {
-                isApproachingSignal = true
-                statusMsg = "CAUTION: Traffic Signal ahead in ${minDistance.toInt()}m!"
-                // Trigger long beep alert for signal light
-                audioAlertManager.playTrafficSignalAlert(nearest.id, soundEnabled)
+                "SPEED_BUMP" -> {
+                    isApproachingBump = true
+                    statusMsg = "ATTENTION: Speed Bump ahead (${minDistance.toInt()}m)!"
+                    // Requirement: Bump 3 beep
+                    audioAlertManager.playSpeedBumpAlert(nearest.id, soundEnabled)
+                    checkFakeBumpCrossing(nearest, minDistance)
+                }
+
+                "TRAFFIC_SIGNAL" -> {
+                    isApproachingSignal = true
+                    statusMsg = "CAUTION: Traffic Signal ahead (${minDistance.toInt()}m)!"
+                    // Requirement: Signal long beep
+                    audioAlertManager.playTrafficSignalAlert(nearest.id, soundEnabled)
+                }
             }
         } else if (hasNearest) {
             statusMsg = "Next: ${nearest?.title} in ${minDistance.toInt()}m"
         }
 
-        // Real distance tracking for Daily Kilometer & Periodical Service Countdown
+        // Distance & Odometer tracking
         if (lastLocationLat != null && lastLocationLon != null) {
             val deltaMeters = calculateDistanceMeters(lastLocationLat!!, lastLocationLon!!, lat, lon)
-            // Filter realistic movement: e.g. delta between 1.0m and 350.0m, and vehicle is moving or in simulation
             if (deltaMeters in 1.0..350.0 && (speedKmH > 1.5f || isSimulating)) {
                 val deltaKm = deltaMeters / 1000.0
                 accumulateTravelDistance(deltaKm)
@@ -277,6 +451,7 @@ class SensorAndRoadTracker(
                 dynamicAlertDistanceMeters = dynamicAlertDistance,
                 isApproachingBump = isApproachingBump,
                 isApproachingSignal = isApproachingSignal,
+                isApproachingGutter = isApproachingGutter,
                 alertStatusMessage = statusMsg,
                 dailyRunKm = dailyRunKm,
                 totalOdometerKm = totalOdometerKm,
@@ -286,9 +461,6 @@ class SensorAndRoadTracker(
         }
     }
 
-    /**
-     * Accumulate distance in km for daily run and countdown periodical service
-     */
     fun accumulateTravelDistance(deltaKm: Double) {
         if (deltaKm <= 0.0) return
         dailyRunKm += deltaKm
@@ -305,7 +477,6 @@ class SensorAndRoadTracker(
             )
         }
 
-        // Persist when at least 50 meters (0.05 km) accumulated
         if (distanceAccumulatedSinceSave >= 0.05) {
             distanceAccumulatedSinceSave = 0.0
             onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
@@ -351,52 +522,59 @@ class SensorAndRoadTracker(
     }
 
     /**
-     * Requirement: "If data give fake bumb detect it via snsers, it happen repeatedly update"
-     * Handles crossing a known bump location.
-     * When vehicle enters <= 15m: mark activeVerifyingObstacleId and reset spike tracker.
-     * When vehicle departs > 18m from previously tracked bump:
-     * Check if verifiedVerticalSpikeInWindow was true.
-     * If false: it was a fake bump! Increment strikeCount.
-     * If strikeCount reaches threshold: mark isSuppressedFake = true!
+     * Requirement:
+     * "Map given bumb alert if there is no bumb a lot( 50 3 bumb each given. Ther is no a single bumb)
+     * Use compass and accilmator censer if other posible sencer to investgate."
+     *
+     * When vehicle enters <= 14m of map bump: start observation window.
+     * When vehicle departs > 16m: check if ANY bump signature was present
+     * (lift, jerk, or slowdown). If NONE occurred:
+     * IMMEDIATELY strike and suppress the fake map bump!
      */
     private fun checkFakeBumpCrossing(obstacle: RoadObstacleEntity, distance: Double) {
-        if (distance <= 15.0) {
+        if (distance <= 14.0) {
             if (activeVerifyingObstacleId != obstacle.id) {
                 activeVerifyingObstacleId = obstacle.id
-                verifiedVerticalSpikeInWindow = false
+                verifiedLiftInWindow = false
+                verifiedJerkInWindow = false
+                verifiedSlowdownInWindow = false
             }
-        } else if (distance > 18.0 && activeVerifyingObstacleId == obstacle.id) {
-            // Vehicle has now passed the bump coordinates
-            val wasVerified = verifiedVerticalSpikeInWindow
+        } else if (distance > 16.0 && activeVerifyingObstacleId == obstacle.id) {
+            val hadSensorResponse = verifiedLiftInWindow || verifiedJerkInWindow || verifiedSlowdownInWindow
             val bumpId = obstacle.id
             activeVerifyingObstacleId = null
 
-            if (!wasVerified) {
-                // No vertical accelerometer spike detected when passing over this bump!
+            if (!hadSensorResponse) {
+                // False map bump! Car passed through without feeling any bump or slowing down!
                 val newStrikes = obstacle.strikeCount + 1
-                val shouldSuppress = newStrikes >= fakeBumpStrikeLimit
-                Log.w(TAG, "Fake bump strike registered for $bumpId! Strikes: $newStrikes (Suppress: $shouldSuppress)")
+                Log.w(TAG, "Fake map obstacle detected ($bumpId): zero lift, jerk, or slowdown! Suppressing.")
 
                 scope.launch {
-                    obstacleDao.updateStrike(bumpId, newStrikes, shouldSuppress)
+                    // Suppress immediately so it stops giving false alerts!
+                    obstacleDao.updateStrike(bumpId, newStrikes, suppressed = true)
                 }
 
                 _telemetry.update { current ->
                     current.copy(
-                        alertStatusMessage = if (shouldSuppress) {
-                            "Fake Bump Verified: Auto-Removed (Repeatedly Unfelt)"
-                        } else {
-                            "Warning: Bump was not felt by car sensors (Strike $newStrikes/$fakeBumpStrikeLimit)"
-                        }
+                        alertStatusMessage = "Fake Map Alert Suppressed (Unfelt by Sensors)"
                     )
                 }
             } else {
-                Log.d(TAG, "Bump $bumpId verified by accelerometer sensor!")
+                Log.d(TAG, "Obstacle $bumpId verified by car sensors (Lift: $verifiedLiftInWindow, Jerk: $verifiedJerkInWindow, Slowdown: $verifiedSlowdownInWindow)")
+                // Reinforce in database
+                scope.launch {
+                    val updated = obstacle.copy(
+                        isConfirmedReal = true,
+                        isSuppressedFake = false,
+                        strikeCount = 0,
+                        sensorHitCount = obstacle.sensorHitCount + 1
+                    )
+                    obstacleDao.insertObstacle(updated)
+                }
             }
         }
     }
 
-    // Helper functions
     private fun getCardinalDirection(degrees: Float): String {
         val directions = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW", "N")
         val index = ((degrees + 22.5f) / 45f).toInt() % 8
@@ -405,7 +583,7 @@ class SensorAndRoadTracker(
 
     companion object {
         fun calculateDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-            val r = 6371000.0 // Earth radius in meters
+            val r = 6371000.0
             val dLat = Math.toRadians(lat2 - lat1)
             val dLon = Math.toRadians(lon2 - lon1)
             val a = sin(dLat / 2) * sin(dLat / 2) +

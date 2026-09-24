@@ -65,6 +65,7 @@ object OverpassService {
 
                         val isBump = trafficCalming.isNotEmpty() || highway == "speed_display" || trafficCalming in listOf("bump", "hump", "table", "cushion")
                         val isSignal = highway == "traffic_signals"
+                        val isGutter = tags?.optString("barrier", "") == "drain" || tags?.optString("waterway", "") == "drain"
 
                         if (isBump) {
                             val bumpTitle = if (name.isNotEmpty()) name else "Speed Bump (${trafficCalming.ifEmpty { "hump" }})"
@@ -90,6 +91,17 @@ object OverpassService {
                                     isAutoDetected = false
                                 )
                             )
+                        } else if (isGutter) {
+                            results.add(
+                                RoadObstacleEntity(
+                                    id = id,
+                                    type = "BIG_GUTTER",
+                                    latitude = lat,
+                                    longitude = lon,
+                                    title = "Road Gutter / Drain",
+                                    isAutoDetected = false
+                                )
+                            )
                         }
                     }
                 }
@@ -101,13 +113,30 @@ object OverpassService {
             Log.e(TAG, "Failed to fetch from Overpass API: ${e.message}")
         }
 
-        // If no obstacles found within radius (e.g. area with sparse OSM coverage or offline),
-        // generate a few realistic test obstacles around the current coordinate so alerts & features can be immediately experienced
-        if (results.isEmpty() && latitude != 0.0 && longitude != 0.0) {
-            results.addAll(generateRealisticSeedObstacles(latitude, longitude))
+        // Deduplicate: merge obstacles of the same type within 45m to prevent false clustering
+        val deduplicated = mutableListOf<RoadObstacleEntity>()
+        for (item in results) {
+            val hasNearby = deduplicated.any { existing ->
+                existing.type == item.type &&
+                        calculateDistanceMeters(item.latitude, item.longitude, existing.latitude, existing.longitude) < 45.0
+            }
+            if (!hasNearby) {
+                deduplicated.add(item)
+            }
         }
 
-        results
+        deduplicated
+    }
+
+    private fun calculateDistanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return r * c
     }
 
     fun generateRealisticSeedObstacles(lat: Double, lon: Double): List<RoadObstacleEntity> {

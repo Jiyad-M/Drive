@@ -26,6 +26,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.CarRepair
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDownload
@@ -102,7 +104,9 @@ import java.util.Locale
 @Composable
 fun KioskSettingsScreen(
     viewModel: KioskViewModel,
-    onBackToKiosk: () -> Unit
+    onBackToKiosk: () -> Unit,
+    onRequestLockTask: () -> Unit = {},
+    onReleaseLockTask: () -> Unit = {}
 ) {
     val settings by viewModel.settings.collectAsState()
     val telemetry by viewModel.telemetry.collectAsState()
@@ -111,7 +115,16 @@ fun KioskSettingsScreen(
     val isFetchingObstacles by viewModel.isFetchingObstacles.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Real Map", "Wallpaper", "Allowed Apps", "Password", "Sensors & Audio", "Service & Run")
+    val tabs = listOf(
+        "Launcher & Kiosk",
+        "Battery & Power",
+        "Allowed Apps",
+        "Password",
+        "Sensors & Audio",
+        "Service & Run",
+        "Real Map",
+        "Wallpaper"
+    )
 
     Scaffold(
         topBar = {
@@ -173,12 +186,14 @@ fun KioskSettingsScreen(
                         icon = {
                             Icon(
                                 imageVector = when (index) {
-                                    0 -> Icons.Default.Map
-                                    1 -> Icons.Default.Wallpaper
+                                    0 -> Icons.Default.Security
+                                    1 -> Icons.Default.BatteryChargingFull
                                     2 -> Icons.Default.Apps
                                     3 -> Icons.Default.Lock
                                     4 -> Icons.Default.Sensors
-                                    else -> Icons.Default.CarRepair
+                                    5 -> Icons.Default.CarRepair
+                                    6 -> Icons.Default.Map
+                                    else -> Icons.Default.Wallpaper
                                 },
                                 contentDescription = title,
                                 tint = if (selectedTab == index) Color(0xFF38BDF8) else Color(0xFF94A3B8),
@@ -195,24 +210,18 @@ fun KioskSettingsScreen(
                     .padding(16.dp)
             ) {
                 when (selectedTab) {
-                    0 -> RealMapTab(
-                        telemetry = telemetry,
-                        obstacles = allObstacles,
-                        isFetching = isFetchingObstacles,
-                        onFetchData = {
-                            viewModel.fetchRoadObstacles(telemetry.latitude, telemetry.longitude)
-                        },
-                        onAddObstacle = { lat, lon, type ->
-                            viewModel.addManualObstacle(lat, lon, type, "")
-                        },
-                        onDeleteObstacle = { viewModel.deleteObstacle(it) },
-                        onResetStrikes = { viewModel.resetFakeBumpStrikes(it) }
+                    0 -> LauncherAndKioskTab(
+                        settings = settings,
+                        onUpdateSettings = { viewModel.updateSettings(it) },
+                        onRequestLockTask = onRequestLockTask,
+                        onReleaseLockTask = onReleaseLockTask
                     )
-                    1 -> WallpaperTab(
-                        currentTheme = settings.wallpaperTheme,
-                        onSelectTheme = { themeId ->
-                            viewModel.updateWallpaper(themeId)
-                        }
+                    1 -> BatteryAndPowerTab(
+                        settings = settings,
+                        telemetry = telemetry,
+                        onUpdateSettings = { viewModel.updateSettings(it) },
+                        onTestStandby = { viewModel.enterStandby() },
+                        onTestEmergency = { viewModel.triggerEmergency() }
                     )
                     2 -> AllowedAppsTab(
                         apps = installedApps,
@@ -240,6 +249,25 @@ fun KioskSettingsScreen(
                         onResetDailyKm = { viewModel.resetDailyKm() },
                         onResetServiceCountdown = { viewModel.resetServiceCountdown() },
                         onUpdateServiceInterval = { viewModel.updateServiceInterval(it) }
+                    )
+                    6 -> RealMapTab(
+                        telemetry = telemetry,
+                        obstacles = allObstacles,
+                        isFetching = isFetchingObstacles,
+                        onFetchData = {
+                            viewModel.fetchRoadObstacles(telemetry.latitude, telemetry.longitude)
+                        },
+                        onAddObstacle = { lat, lon, type ->
+                            viewModel.addManualObstacle(lat, lon, type, "")
+                        },
+                        onDeleteObstacle = { viewModel.deleteObstacle(it) },
+                        onResetStrikes = { viewModel.resetFakeBumpStrikes(it) }
+                    )
+                    7 -> WallpaperTab(
+                        currentTheme = settings.wallpaperTheme,
+                        onSelectTheme = { themeId ->
+                            viewModel.updateWallpaper(themeId)
+                        }
                     )
                 }
             }

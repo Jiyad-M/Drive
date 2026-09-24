@@ -11,6 +11,7 @@ import android.os.VibratorManager
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -34,6 +35,31 @@ class AudioAlertManager(private val context: Context) {
             toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize ToneGenerator: ${e.message}")
+        }
+    }
+
+    /**
+     * Big Gutter / Pothole arrival: 1 single crisp beep
+     */
+    fun playGutterAlert(obstacleId: String, soundEnabled: Boolean = true) {
+        val now = System.currentTimeMillis()
+        val lastAlert = alertCooldownMap[obstacleId] ?: 0L
+        if (now - lastAlert < 15_000L) {
+            return
+        }
+        alertCooldownMap[obstacleId] = now
+
+        triggerVibrationGutter()
+
+        if (!soundEnabled) return
+
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                // Single beep (220ms)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 220)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error playing gutter single beep: ${e.message}")
+            }
         }
     }
 
@@ -101,6 +127,65 @@ class AudioAlertManager(private val context: Context) {
                 Log.e(TAG, "Error playing chime: ${e.message}")
             }
         }
+    }
+
+    private var emergencySirenJob: Job? = null
+
+    fun startEmergencySiren() {
+        stopEmergencySiren()
+        emergencySirenJob = CoroutineScope(Dispatchers.Default).launch {
+            try {
+                while (true) {
+                    toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 450)
+                    triggerVibrationSignal()
+                    delay(500)
+                    toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 400)
+                    delay(450)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun stopEmergencySiren() {
+        emergencySirenJob?.cancel()
+        emergencySirenJob = null
+        try {
+            toneGenerator?.stopTone()
+            vibrator?.cancel()
+        } catch (_: Exception) {}
+    }
+
+    fun playPowerChime(connected: Boolean) {
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                if (connected) {
+                    toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 100)
+                    delay(120)
+                    toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 180)
+                } else {
+                    toneGenerator?.startTone(ToneGenerator.TONE_PROP_NACK, 220)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun playWakeChime() {
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 80)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun triggerVibrationGutter() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createOneShot(180, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(180)
+            }
+        } catch (_: Exception) {}
     }
 
     private fun triggerVibrationBump() {

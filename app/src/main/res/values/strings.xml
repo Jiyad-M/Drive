@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Drive Safe</string>
+    <string name="device_admin_label">Drive Safe Kiosk Admin</string>
+    <string name="device_admin_description">Enables instant screen lock on charger disconnect and kiosk security lock down.</string>
+    <string name="accessibility_service_desc">Enforces strict unwanted app restriction and prevents unauthorized exits.</string>
 </resources>

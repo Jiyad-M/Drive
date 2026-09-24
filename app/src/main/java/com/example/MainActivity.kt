@@ -1,8 +1,10 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -19,6 +21,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,8 +30,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.service.KioskDeviceAdminReceiver
+import com.example.ui.screens.EmergencyScreen
 import com.example.ui.screens.KioskHomeScreen
 import com.example.ui.screens.KioskSettingsScreen
+import com.example.ui.screens.StandbyScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.KioskViewModel
 
@@ -39,6 +45,8 @@ enum class KioskScreen {
 
 class MainActivity : ComponentActivity() {
 
+    private var isKioskLockArmed = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -48,6 +56,31 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme(darkTheme = true) {
                 val kioskViewModel: KioskViewModel = viewModel()
                 var currentScreen by remember { mutableStateOf(KioskScreen.HOME) }
+                val settings by kioskViewModel.settings.collectAsState()
+                val telemetry by kioskViewModel.telemetry.collectAsState()
+                val showWakeDeniedHint by kioskViewModel.showWakeDeniedHint.collectAsState()
+
+                // Setup screen wake/sleep callbacks
+                LaunchedEffect(Unit) {
+                    kioskViewModel.powerManager.onScreenWakeRequested = {
+                        runOnUiThread {
+                            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            val lp = window.attributes
+                            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                            window.attributes = lp
+                        }
+                    }
+
+                    kioskViewModel.powerManager.onScreenSleepRequested = {
+                        runOnUiThread {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            val lp = window.attributes
+                            lp.screenBrightness = 0.01f
+                            window.attributes = lp
+                            KioskDeviceAdminReceiver.lockDevice(this@MainActivity)
+                        }
+                    }
+                }
 
                 // Request location permissions gracefully
                 val permissionLauncher = rememberLauncherForActivityResult(
@@ -75,41 +108,100 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Kiosk Back-button safety handling
+                // Kiosk Back-button safety handling: Back never exits app
                 BackHandler {
-                    if (currentScreen == KioskScreen.SETTINGS) {
+                    if (telemetry.isEmergencyActive) {
+                        // In emergency, must use PIN exit
+                    } else if (telemetry.isStandbyActive) {
+                        // Double tap to wake
+                    } else if (currentScreen == KioskScreen.SETTINGS) {
                         currentScreen = KioskScreen.HOME
                     }
-                    // If on HOME, kiosk stays on HOME (prevents accidental exit without PIN)
+                    // If on HOME, kiosk stays on HOME (cannot exit without PIN in settings)
                 }
 
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF0B0F19)
                 ) {
-                    AnimatedContent(
-                        targetState = currentScreen,
-                        transitionSpec = { fadeIn() togetherWith fadeOut() },
-                        label = "screen_transition"
-                    ) { screen ->
-                        when (screen) {
-                            KioskScreen.HOME -> KioskHomeScreen(
-                                viewModel = kioskViewModel,
-                                onOpenSettings = {
-                                    kioskViewModel.loadInstalledAppsList()
-                                    currentScreen = KioskScreen.SETTINGS
-                                }
+                    when {
+                        telemetry.isEmergencyActive -> {
+                            EmergencyScreen(
+                                telemetry = telemetry,
+                                emergencyNumber = settings.emergencyNumber,
+                                emergencySmsContact = settings.emergencySmsContact,
+                                pinCode = settings.pinCode,
+                                isTorchActive = telemetry.isTorchActive,
+                                onToggleTorch = { kioskViewModel.toggleTorch() },
+                                onDismissEmergency = { kioskViewModel.dismissEmergency() }
                             )
-                            KioskScreen.SETTINGS -> KioskSettingsScreen(
-                                viewModel = kioskViewModel,
-                                onBackToKiosk = {
-                                    currentScreen = KioskScreen.HOME
-                                }
+                        }
+                        telemetry.isStandbyActive -> {
+                            StandbyScreen(
+                                isChargerConnected = telemetry.isChargerConnected,
+                                batteryPercent = telemetry.batteryPercent,
+                                onDoubleTapWake = { kioskViewModel.wakeFromStandby() },
+                                showWakeDeniedHint = showWakeDeniedHint
                             )
+                        }
+                        else -> {
+                            AnimatedContent(
+                                targetState = currentScreen,
+                                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                                label = "screen_transition"
+                            ) { screen ->
+                                when (screen) {
+                                    KioskScreen.HOME -> KioskHomeScreen(
+                                        viewModel = kioskViewModel,
+                                        onOpenSettings = {
+                                            kioskViewModel.loadInstalledAppsList()
+                                            currentScreen = KioskScreen.SETTINGS
+                                        }
+                                    )
+                                    KioskScreen.SETTINGS -> KioskSettingsScreen(
+                                        viewModel = kioskViewModel,
+                                        onBackToKiosk = {
+                                            currentScreen = KioskScreen.HOME
+                                        },
+                                        onRequestLockTask = { requestLockTaskMode() },
+                                        onReleaseLockTask = { releaseLockTaskMode() }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (isKioskLockArmed) {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            }
+            startActivity(intent)
+        }
+    }
+
+    private fun requestLockTaskMode() {
+        try {
+            startLockTask()
+            isKioskLockArmed = true
+            Log.i("MainActivity", "LockTask (Screen Pinning) enabled")
+        } catch (e: Exception) {
+            Log.w("MainActivity", "startLockTask failed: ${e.message}")
+        }
+    }
+
+    private fun releaseLockTaskMode() {
+        try {
+            stopLockTask()
+            isKioskLockArmed = false
+            Log.i("MainActivity", "LockTask (Screen Pinning) stopped")
+        } catch (e: Exception) {
+            Log.w("MainActivity", "stopLockTask failed: ${e.message}")
         }
     }
 }

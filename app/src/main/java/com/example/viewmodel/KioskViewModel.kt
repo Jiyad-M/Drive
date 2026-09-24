@@ -12,7 +12,10 @@ import com.example.data.model.TelemetryData
 import com.example.service.AudioAlertManager
 import com.example.service.InstalledAppItem
 import com.example.service.InstalledAppsManager
+import com.example.service.KioskAccessibilityService
+import com.example.service.KioskDeviceAdminReceiver
 import com.example.service.LocationTracker
+import com.example.service.PowerAndEmergencyManager
 import com.example.service.SensorAndRoadTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +24,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -40,8 +44,7 @@ class KioskViewModel(application: Application) : AndroidViewModel(application) {
     val sensorTracker = SensorAndRoadTracker(application, obstacleDao, audioAlertManager)
     val locationTracker = LocationTracker(application, sensorTracker)
     val installedAppsManager = InstalledAppsManager(application, allowedAppDao)
-
-    val telemetry: StateFlow<TelemetryData> = sensorTracker.telemetry
+    val powerManager = PowerAndEmergencyManager(application, audioAlertManager)
 
     val allowedApps: StateFlow<List<AllowedAppEntity>> = allowedAppDao.getAllowedApps()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -56,6 +59,27 @@ class KioskViewModel(application: Application) : AndroidViewModel(application) {
             SharingStarted.Eagerly,
             KioskSettingsEntity()
         )
+
+    val telemetry: StateFlow<TelemetryData> = combine(
+        sensorTracker.telemetry,
+        powerManager.isChargerConnected,
+        powerManager.batteryPercent,
+        powerManager.isStandbyActive,
+        combine(
+            powerManager.isEmergencyActive,
+            powerManager.disconnectCountdown,
+            powerManager.isTorchActive
+        ) { em, cd, torch -> Triple(em, cd, torch) }
+    ) { sensorTel, isCharging, batPct, standby, triple ->
+        sensorTel.copy(
+            isChargerConnected = isCharging,
+            batteryPercent = batPct,
+            isStandbyActive = standby,
+            isEmergencyActive = triple.first,
+            disconnectCountdown = triple.second,
+            isTorchActive = triple.third
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, TelemetryData())
 
     private val _installedAppsList = MutableStateFlow<List<InstalledAppItem>>(emptyList())
     val installedAppsList: StateFlow<List<InstalledAppItem>> = _installedAppsList.asStateFlow()
@@ -74,9 +98,28 @@ class KioskViewModel(application: Application) : AndroidViewModel(application) {
     private val _isServiceCountdownRevealed = MutableStateFlow(false)
     val isServiceCountdownRevealed: StateFlow<Boolean> = _isServiceCountdownRevealed.asStateFlow()
 
+    // Power wake denied hint
+    private val _showWakeDeniedHint = MutableStateFlow(false)
+    val showWakeDeniedHint: StateFlow<Boolean> = _showWakeDeniedHint.asStateFlow()
+
     private var tapResetJob: Job? = null
 
     init {
+        powerManager.startListening()
+
+        powerManager.onPowerWakeDeniedCallback = {
+            _showWakeDeniedHint.value = true
+            // If device admin active, force sleep device immediately
+            KioskDeviceAdminReceiver.lockDevice(application)
+        }
+
+        viewModelScope.launch {
+            // Keep Accessibility Service allowed packages in sync
+            combine(allowedApps, settings) { apps, s ->
+                val set = apps.filter { it.isAllowed }.map { it.packageName }.toSet()
+                KioskAccessibilityService.updateAllowedPackages(set, s.kioskLockEnabled)
+            }.collect {}
+        }
         viewModelScope.launch {
             // Ensure default settings exist and apply odometer state
             val currentSettings = settingsDao.getSettingsSnapshot() ?: KioskSettingsEntity().also {
@@ -139,6 +182,36 @@ class KioskViewModel(application: Application) : AndroidViewModel(application) {
         sensorTracker.bumpSensitivityThreshold = s.bumpSensitivity
         sensorTracker.soundEnabled = s.soundEnabled
         sensorTracker.fakeBumpStrikeLimit = s.fakeBumpThreshold
+        powerManager.batteryModeEnabled = s.batteryModeEnabled
+        powerManager.disconnectDelaySec = s.disconnectDelaySec
+        powerManager.denyPowerButtonWakeup = s.denyPowerButtonWakeup
+        powerManager.power3TimesWakeupEnabled = s.power3TimesWakeupEnabled
+    }
+
+    fun wakeFromStandby() {
+        powerManager.onDoubleTapWakeup()
+        _showWakeDeniedHint.value = false
+    }
+
+    fun enterStandby() {
+        powerManager.enterStandby()
+    }
+
+    fun triggerEmergency() {
+        powerManager.triggerEmergencyMode()
+    }
+
+    fun dismissEmergency() {
+        powerManager.dismissEmergencyMode()
+    }
+
+    fun toggleTorch() {
+        val current = telemetry.value.isTorchActive
+        powerManager.toggleTorchManual(!current)
+    }
+
+    fun cancelDisconnectCountdown() {
+        powerManager.cancelDisconnectCountdown()
     }
 
     /**
@@ -344,6 +417,7 @@ class KioskViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        powerManager.stopListening()
         sensorTracker.stopListening()
         locationTracker.stopLocationUpdates()
         audioAlertManager.release()

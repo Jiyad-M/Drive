@@ -35,8 +35,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CarRepair
+import androidx.compose.material.icons.filled.Emergency
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PowerOff
 import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Traffic
 import androidx.compose.material.icons.filled.Warning
@@ -269,9 +272,9 @@ fun KioskHomeScreen(
                 }
             }
 
-            // Real-Time Road Hazard HUD (Only appears when approaching bump / traffic signal)
+            // Real-Time Road Hazard HUD (Only appears when approaching bump / gutter / traffic signal)
             AnimatedVisibility(
-                visible = telemetry.isApproachingBump || telemetry.isApproachingSignal,
+                visible = telemetry.isApproachingBump || telemetry.isApproachingSignal || telemetry.isApproachingGutter,
                 enter = slideInVertically { -it } + fadeIn(),
                 exit = slideOutVertically { -it } + fadeOut(),
                 modifier = Modifier
@@ -279,6 +282,110 @@ fun KioskHomeScreen(
                     .padding(top = 10.dp, start = 20.dp, end = 20.dp)
             ) {
                 FloatingHazardAlertHUD(telemetry = telemetry)
+            }
+
+            // Requirement: Disconnect off within small delay eg 5sec
+            // Floating countdown alert that user can tap to stay on
+            AnimatedVisibility(
+                visible = telemetry.disconnectCountdown != null,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 12.dp, start = 20.dp, end = 20.dp)
+            ) {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFDC2626)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                    modifier = Modifier
+                        .clickable { viewModel.cancelDisconnectCountdown() }
+                        .testTag("disconnect_countdown_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PowerOff,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "Charger disconnected. Screen turning off in ${telemetry.disconnectCountdown}s (Tap to Cancel)",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
+            // Bottom-Left: Subtle Power & Emergency SOS hotspot
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 18.dp, bottom = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Battery & Charger indicator pill
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF0F172A).copy(alpha = 0.88f))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (telemetry.isChargerConnected) Icons.Default.BatteryChargingFull else Icons.Default.PowerOff,
+                            contentDescription = null,
+                            tint = if (telemetry.isChargerConnected) Color(0xFF10B981) else Color(0xFF94A3B8),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (telemetry.isChargerConnected) "⚡ ${telemetry.batteryPercent}%" else "${telemetry.batteryPercent}%",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                // SOS Trigger button
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF7F1D1D).copy(alpha = 0.85f))
+                        .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.5f), RoundedCornerShape(16.dp))
+                        .clickable { viewModel.triggerEmergency() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .testTag("manual_sos_button")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Emergency,
+                            contentDescription = "Manual SOS",
+                            tint = Color(0xFFFCA5A5),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "SOS",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
             }
 
             // Requirement: "km on right bottom"
@@ -438,10 +545,25 @@ fun CleanBottomRightKmWidget(
 @Composable
 fun FloatingHazardAlertHUD(telemetry: TelemetryData) {
     val isApproachingSignal = telemetry.isApproachingSignal
+    val isApproachingGutter = telemetry.isApproachingGutter
 
-    val bannerColor = if (isApproachingSignal) Color(0xFFDC2626) else Color(0xFFD97706)
-    val titleText = if (isApproachingSignal) "TRAFFIC SIGNAL AHEAD" else "SPEED BUMP AHEAD"
-    val subText = if (isApproachingSignal) "Long beep alert" else "3-beep alert"
+    val bannerColor = when {
+        isApproachingGutter -> Color(0xFF0284C7)
+        isApproachingSignal -> Color(0xFFDC2626)
+        else -> Color(0xFFD97706)
+    }
+
+    val titleText = when {
+        isApproachingGutter -> "BIG GUTTER / POTHOLE AHEAD"
+        isApproachingSignal -> "TRAFFIC SIGNAL AHEAD"
+        else -> "SPEED BUMP AHEAD"
+    }
+
+    val subText = when {
+        isApproachingGutter -> "Single beep alert"
+        isApproachingSignal -> "Long beep alert"
+        else -> "3-beep alert"
+    }
 
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -460,7 +582,11 @@ fun FloatingHazardAlertHUD(telemetry: TelemetryData) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    imageVector = if (isApproachingSignal) Icons.Default.Traffic else Icons.Default.Warning,
+                    imageVector = when {
+                        isApproachingGutter -> Icons.Default.Warning
+                        isApproachingSignal -> Icons.Default.Traffic
+                        else -> Icons.Default.Warning
+                    },
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(24.dp)
