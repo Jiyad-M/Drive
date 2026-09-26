@@ -13,6 +13,19 @@ data class WallpaperOption(
 object WallpaperProvider {
     val options = listOf(
         WallpaperOption(
+            id = "map",
+            name = "Live Road Map (Default)",
+            previewColors = listOf(Color(0xFF0284C7), Color(0xFF0F172A)),
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF070A13),
+                    Color(0xFF0B192C),
+                    Color(0xFF0F2A4A),
+                    Color(0xFF070A13)
+                )
+            )
+        ),
+        WallpaperOption(
             id = "carbon",
             name = "Carbon Sport",
             previewColors = listOf(Color(0xFF0F172A), Color(0xFF1E293B)),

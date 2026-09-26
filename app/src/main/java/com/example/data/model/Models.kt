@@ -35,7 +35,7 @@ data class KioskSettingsEntity(
     @PrimaryKey
     val id: Int = 1,
     val pinCode: String = "1234",
-    val wallpaperTheme: String = "carbon", // "carbon", "midnight", "amber", "emerald", "sunset", "custom"
+    val wallpaperTheme: String = "map", // "map", "carbon", "midnight", "amber", "emerald"
     val customWallpaperColor: Long = 0xFF0B132BL,
     val soundEnabled: Boolean = true,
     val bumpSensitivity: Float = 14.0f, // vertical accel threshold in m/s^2 (normal gravity is ~9.8)
@@ -51,15 +51,21 @@ data class KioskSettingsEntity(
     // Launcher & Kiosk Lockdown
     val kioskLockEnabled: Boolean = true,
     val restrictBackgroundData: Boolean = true,
-    // Battery Mode (Charger connected screen on, Disconnect off within delay)
+    // Battery Mode (Charger connected screen on, Disconnect off completely within delay)
     val batteryModeEnabled: Boolean = true,
     val disconnectDelaySec: Int = 5,
     val denyPowerButtonWakeup: Boolean = true,
     val doubleTapWakeupEnabled: Boolean = true,
     // 3-times Power Press to wake display on battery
     val power3TimesWakeupEnabled: Boolean = true,
-    val emergencyNumber: String = "911",
-    val emergencySmsContact: String = ""
+    // Cash Received Voice Announcement
+    val cashAnnouncementEnabled: Boolean = true,
+    val cashTtsEnabled: Boolean = true,
+    // App Pair (Dual app / split screen shortcut)
+    val appPairPackage: String = "com.google.android.apps.maps",
+    val appPairName: String = "Google Maps",
+    val appPairIconPath: String = "",
+    val showAppPairOnDashboard: Boolean = true
 )
 
 enum class ObstacleType(val displayName: String) {
@@ -67,6 +73,14 @@ enum class ObstacleType(val displayName: String) {
     TRAFFIC_SIGNAL("Traffic Signal"),
     BIG_GUTTER("Big Gutter / Pothole")
 }
+
+data class CashAlertItem(
+    val id: Long = System.currentTimeMillis(),
+    val amountText: String,
+    val sender: String,
+    val fullMessage: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
 
 data class TelemetryData(
     val currentSpeedKmH: Float = 0f,
@@ -90,7 +104,6 @@ data class TelemetryData(
     val isChargerConnected: Boolean = false,
     val batteryPercent: Int = 100,
     val isStandbyActive: Boolean = false,
-    val isEmergencyActive: Boolean = false,
     val disconnectCountdown: Int? = null,
-    val isTorchActive: Boolean = false
+    val lastCashAlert: CashAlertItem? = null
 )

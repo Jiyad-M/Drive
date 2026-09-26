@@ -129,30 +129,17 @@ class AudioAlertManager(private val context: Context) {
         }
     }
 
-    private var emergencySirenJob: Job? = null
-
-    fun startEmergencySiren() {
-        stopEmergencySiren()
-        emergencySirenJob = CoroutineScope(Dispatchers.Default).launch {
+    fun playCashAlertChime() {
+        CoroutineScope(Dispatchers.Default).launch {
             try {
-                while (true) {
-                    toneGenerator?.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 450)
-                    triggerVibrationSignal()
-                    delay(500)
-                    toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 400)
-                    delay(450)
-                }
-            } catch (_: Exception) {}
+                // High-pitched double ding (Cash register tone)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 180)
+                delay(120)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 220)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error playing cash alert chime: ${e.message}")
+            }
         }
-    }
-
-    fun stopEmergencySiren() {
-        emergencySirenJob?.cancel()
-        emergencySirenJob = null
-        try {
-            toneGenerator?.stopTone()
-            vibrator?.cancel()
-        } catch (_: Exception) {}
     }
 
     fun playPowerChime(connected: Boolean) {

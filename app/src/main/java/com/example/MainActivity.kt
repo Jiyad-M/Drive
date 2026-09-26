@@ -30,8 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.service.KioskAccessibilityService
 import com.example.service.KioskDeviceAdminReceiver
-import com.example.ui.screens.EmergencyScreen
 import com.example.ui.screens.KioskHomeScreen
 import com.example.ui.screens.KioskSettingsScreen
 import com.example.ui.screens.StandbyScreen
@@ -46,6 +46,7 @@ enum class KioskScreen {
 class MainActivity : ComponentActivity() {
 
     private var isKioskLockArmed = false
+    private var viewModelInstance: KioskViewModel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -55,10 +56,20 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme(darkTheme = true) {
                 val kioskViewModel: KioskViewModel = viewModel()
+                viewModelInstance = kioskViewModel
+
                 var currentScreen by remember { mutableStateOf(KioskScreen.HOME) }
                 val settings by kioskViewModel.settings.collectAsState()
                 val telemetry by kioskViewModel.telemetry.collectAsState()
                 val showWakeDeniedHint by kioskViewModel.showWakeDeniedHint.collectAsState()
+
+                // Check intent for App Pair dual launch
+                LaunchedEffect(intent) {
+                    val pairPkg = intent?.getStringExtra("LAUNCH_APP_PAIR")
+                    if (!pairPkg.isNullOrEmpty()) {
+                        kioskViewModel.launchSplitScreenAppPair(pairPkg)
+                    }
+                }
 
                 // Setup screen wake/sleep callbacks
                 LaunchedEffect(Unit) {
@@ -73,11 +84,16 @@ class MainActivity : ComponentActivity() {
 
                     kioskViewModel.powerManager.onScreenSleepRequested = {
                         runOnUiThread {
+                            // Turn physical display off completely (no backlight/shade)
                             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                             val lp = window.attributes
-                            lp.screenBrightness = 0.01f
+                            lp.screenBrightness = 0.0f
                             window.attributes = lp
-                            KioskDeviceAdminReceiver.lockDevice(this@MainActivity)
+
+                            val adminLocked = KioskDeviceAdminReceiver.lockDevice(this@MainActivity)
+                            if (!adminLocked) {
+                                KioskAccessibilityService.lockDeviceScreen()
+                            }
                         }
                     }
                 }
@@ -110,14 +126,11 @@ class MainActivity : ComponentActivity() {
 
                 // Kiosk Back-button safety handling: Back never exits app
                 BackHandler {
-                    if (telemetry.isEmergencyActive) {
-                        // In emergency, must use PIN exit
-                    } else if (telemetry.isStandbyActive) {
-                        // Double tap to wake
+                    if (telemetry.isStandbyActive) {
+                        // Double tap or 3 power presses to wake
                     } else if (currentScreen == KioskScreen.SETTINGS) {
                         currentScreen = KioskScreen.HOME
                     }
-                    // If on HOME, kiosk stays on HOME (cannot exit without PIN in settings)
                 }
 
                 Surface(
@@ -125,17 +138,6 @@ class MainActivity : ComponentActivity() {
                     color = Color(0xFF0B0F19)
                 ) {
                     when {
-                        telemetry.isEmergencyActive -> {
-                            EmergencyScreen(
-                                telemetry = telemetry,
-                                emergencyNumber = settings.emergencyNumber,
-                                emergencySmsContact = settings.emergencySmsContact,
-                                pinCode = settings.pinCode,
-                                isTorchActive = telemetry.isTorchActive,
-                                onToggleTorch = { kioskViewModel.toggleTorch() },
-                                onDismissEmergency = { kioskViewModel.dismissEmergency() }
-                            )
-                        }
                         telemetry.isStandbyActive -> {
                             StandbyScreen(
                                 isChargerConnected = telemetry.isChargerConnected,
@@ -172,6 +174,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val pairPkg = intent.getStringExtra("LAUNCH_APP_PAIR")
+        if (!pairPkg.isNullOrEmpty()) {
+            viewModelInstance?.launchSplitScreenAppPair(pairPkg)
         }
     }
 

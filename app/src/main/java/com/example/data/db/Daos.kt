@@ -15,6 +15,9 @@ interface AllowedAppDao {
     @Query("SELECT * FROM allowed_apps ORDER BY orderIndex ASC, appName ASC")
     fun getAllApps(): Flow<List<AllowedAppEntity>>
 
+    @Query("SELECT * FROM allowed_apps ORDER BY orderIndex ASC, appName ASC")
+    suspend fun getAllAppsList(): List<AllowedAppEntity>
+
     @Query("SELECT * FROM allowed_apps WHERE isAllowed = 1 ORDER BY orderIndex ASC, appName ASC")
     fun getAllowedApps(): Flow<List<AllowedAppEntity>>
 

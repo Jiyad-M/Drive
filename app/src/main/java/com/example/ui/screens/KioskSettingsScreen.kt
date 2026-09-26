@@ -95,6 +95,7 @@ import com.example.data.model.RoadObstacleEntity
 import com.example.data.model.TelemetryData
 import com.example.service.InstalledAppItem
 import com.example.ui.components.RealOsmMapView
+import com.example.ui.components.SmoothToggleSwitch
 import com.example.ui.theme.WallpaperOption
 import com.example.ui.theme.WallpaperProvider
 import com.example.viewmodel.KioskViewModel
@@ -214,14 +215,18 @@ fun KioskSettingsScreen(
                         settings = settings,
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onRequestLockTask = onRequestLockTask,
-                        onReleaseLockTask = onReleaseLockTask
+                        onReleaseLockTask = onReleaseLockTask,
+                        onLaunchSplitScreen = { viewModel.launchSplitScreenAppPair(it) },
+                        onPinAppPairShortcut = { pkg, name -> viewModel.pinAppPairShortcut(pkg, name) },
+                        onImportIcon = { viewModel.importCustomAppPairIcon(it) },
+                        onResetIcon = { viewModel.resetCustomAppPairIcon() }
                     )
                     1 -> BatteryAndPowerTab(
                         settings = settings,
                         telemetry = telemetry,
                         onUpdateSettings = { viewModel.updateSettings(it) },
                         onTestStandby = { viewModel.enterStandby() },
-                        onTestEmergency = { viewModel.triggerEmergency() }
+                        onSimulateCashNotification = { viewModel.simulateCashNotification() }
                     )
                     2 -> AllowedAppsTab(
                         apps = installedApps,
@@ -334,7 +339,7 @@ fun RealMapTab(
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("+ Bump", fontSize = 11.sp)
+                    Text("Mark Bump", fontSize = 11.sp)
                 }
 
                 Button(
@@ -350,7 +355,7 @@ fun RealMapTab(
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("+ Signal", fontSize = 11.sp)
+                    Text("Mark Signal", fontSize = 11.sp)
                 }
             }
         }
@@ -701,18 +706,13 @@ fun AllowedAppsTab(
                             }
                         }
 
-                        Switch(
+                        SmoothToggleSwitch(
                             checked = app.isAllowed,
                             onCheckedChange = { isChecked ->
                                 onToggleApp(app.packageName, app.label, isChecked)
                             },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = Color(0xFF0284C7),
-                                uncheckedThumbColor = Color(0xFF94A3B8),
-                                uncheckedTrackColor = Color(0xFF334155)
-                            ),
-                            modifier = Modifier.testTag("app_switch_${app.packageName}")
+                            activeColor = Color(0xFF0284C7),
+                            testTag = "app_switch_${app.packageName}"
                         )
                     }
                 }
@@ -940,12 +940,12 @@ fun SensorsAndAudioTab(
                                     fontSize = 11.sp
                                 )
                             }
-                            Switch(
+                            SmoothToggleSwitch(
                                 checked = settings.soundEnabled,
                                 onCheckedChange = {
                                     onUpdateSettings(settings.copy(soundEnabled = it))
                                 },
-                                colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF0284C7))
+                                activeColor = Color(0xFF0284C7)
                             )
                         }
                     }

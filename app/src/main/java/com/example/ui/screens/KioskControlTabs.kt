@@ -4,11 +4,17 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,18 +31,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DataSaverOn
-import androidx.compose.material.icons.filled.Emergency
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PowerOff
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Splitscreen
 import androidx.compose.material.icons.filled.TouchApp
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,8 +56,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,28 +66,58 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.data.model.KioskSettingsEntity
 import com.example.data.model.TelemetryData
+import com.example.service.CashNotificationListenerService
 import com.example.service.KioskAccessibilityService
 import com.example.service.KioskDeviceAdminReceiver
 import com.example.ui.components.PinEntryDialog
+import com.example.ui.components.SmoothToggleSwitch
+import java.io.File
 
 @Composable
 fun LauncherAndKioskTab(
     settings: KioskSettingsEntity,
     onUpdateSettings: (KioskSettingsEntity) -> Unit,
     onRequestLockTask: () -> Unit,
-    onReleaseLockTask: () -> Unit
+    onReleaseLockTask: () -> Unit,
+    onLaunchSplitScreen: ((String) -> Unit)? = null,
+    onPinAppPairShortcut: ((String, String) -> Unit)? = null,
+    onImportIcon: ((Uri) -> Unit)? = null,
+    onResetIcon: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
     var showExitPinDialog by remember { mutableStateOf(false) }
     var actionStatusMessage by remember { mutableStateOf("") }
+
+    var companionPackageInput by remember { mutableStateOf(settings.appPairPackage) }
+    var companionNameInput by remember { mutableStateOf(settings.appPairName) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onImportIcon?.invoke(uri)
+        }
+    }
+
+    val customIconFile = remember(settings.appPairIconPath) {
+        if (settings.appPairIconPath.isNotEmpty()) File(settings.appPairIconPath) else null
+    }
+    val customBitmap = remember(customIconFile) {
+        if (customIconFile != null && customIconFile.exists()) {
+            BitmapFactory.decodeFile(customIconFile.absolutePath)
+        } else null
+    }
 
     val isAdminActive = remember(settings) {
         KioskDeviceAdminReceiver.isDeviceAdminActive(context)
@@ -98,33 +135,218 @@ fun LauncherAndKioskTab(
                 onReleaseLockTask()
                 actionStatusMessage = "Kiosk unlocked. You can now minimize or switch apps."
             },
-            onDismiss = { showExitPinDialog = false }
+            onDismiss = {
+                showExitPinDialog = false
+            }
         )
     }
 
     LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("launcher_kiosk_tab"),
         verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier.fillMaxSize().testTag("launcher_kiosk_tab")
+        contentPadding = PaddingValues(bottom = 32.dp)
     ) {
-        // Header
+        // App Pair / Dual Screen Shortcut Card (Requirement: Stored two app screen share in one icon)
         item {
-            Column {
-                Text(
-                    text = "Launcher & Kiosk Lockdown",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "Configure Drive Safe as inescapable launcher, lock screen navigation, and restrict unwanted apps.",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                border = BorderStroke(1.dp, Color(0xFF0284C7)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF0284C7).copy(alpha = 0.25f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Splitscreen, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text("Dual Screen / App Pair Shortcut", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Touch one icon to open Drive Safe & companion app simultaneously", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    OutlinedTextField(
+                        value = companionNameInput,
+                        onValueChange = {
+                            companionNameInput = it
+                            onUpdateSettings(settings.copy(appPairName = it))
+                        },
+                        label = { Text("Companion App Name (e.g., Google Maps, Uber)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color(0xFF0F172A),
+                            unfocusedContainerColor = Color(0xFF0F172A),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = companionPackageInput,
+                        onValueChange = {
+                            companionPackageInput = it
+                            onUpdateSettings(settings.copy(appPairPackage = it))
+                        },
+                        label = { Text("Package Name (e.g., com.google.android.apps.maps)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color(0xFF0F172A),
+                            unfocusedContainerColor = Color(0xFF0F172A),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Import Custom Icon Section (Requirement: I already creTe a icon of two app screen share. I wanna import that icon)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0F172A))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(52.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF1E293B))
+                                    .border(1.5.dp, Color(0xFF38BDF8), RoundedCornerShape(12.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (customBitmap != null) {
+                                    Image(
+                                        bitmap = customBitmap.asImageBitmap(),
+                                        contentDescription = "Imported App Pair Icon",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Image(
+                                        painter = painterResource(R.drawable.img_split_app_pair),
+                                        contentDescription = "Default App Pair Icon",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Column {
+                                Text(
+                                    text = if (customBitmap != null) "Custom Icon Imported" else "Standard Icon",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = if (customBitmap != null) "✓ Your icon is active" else "Import your created icon",
+                                    color = if (customBitmap != null) Color(0xFF10B981) else Color(0xFF94A3B8),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Button(
+                                onClick = {
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Import Icon", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            if (customBitmap != null) {
+                                OutlinedButton(
+                                    onClick = { onResetIcon?.invoke() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, Color(0xFF64748B)),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Reset", fontSize = 11.sp, color = Color(0xFF94A3B8))
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Toggle: Show App Pair card on dashboard grid
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Show On Front Dashboard Grid", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Places your dual-app shortcut directly inside the home app grid", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                        }
+
+                        SmoothToggleSwitch(
+                            checked = settings.showAppPairOnDashboard,
+                            onCheckedChange = { onUpdateSettings(settings.copy(showAppPairOnDashboard = it)) },
+                            testTag = "show_app_pair_dashboard_toggle"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = { onLaunchSplitScreen?.invoke(companionPackageInput) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Splitscreen, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Open Split Screen", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = { onPinAppPairShortcut?.invoke(companionPackageInput, companionNameInput) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F172A)),
+                            border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Pin to Home", fontSize = 12.sp, color = Color(0xFF38BDF8), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
 
-        // Section 1: Default Launcher Configuration
+        // Section 1: Default Home Launcher
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -150,38 +372,25 @@ fun LauncherAndKioskTab(
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text("Default Home Launcher", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                Text("Make Drive Safe the system home screen", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                                Text("Default Home App", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("Set Drive Safe as primary home launcher", color = Color(0xFF94A3B8), fontSize = 11.sp)
                             }
                         }
+
+                        Button(
+                            onClick = { openHomeLauncherSettings(context) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text("Configure", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    Button(
-                        onClick = {
-                            openHomeLauncherSettings(context)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth().testTag("set_default_launcher_button")
-                    ) {
-                        Icon(Icons.Default.Home, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Set Drive Safe as Default Launcher", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "• When set as default launcher, pressing the Home button always returns directly to Drive Safe.",
-                        color = Color(0xFF64748B),
-                        fontSize = 11.sp
-                    )
                 }
             }
         }
 
-        // Section 2: Strict Kiosk Lock (Can't minimize, Can't exit)
+        // Section 2: Strict Kiosk Mode with Smooth Toggle Switch
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -212,7 +421,8 @@ fun LauncherAndKioskTab(
                             }
                         }
 
-                        Switch(
+                        // Smooth Toggle Switch
+                        SmoothToggleSwitch(
                             checked = settings.kioskLockEnabled,
                             onCheckedChange = { isChecked ->
                                 onUpdateSettings(settings.copy(kioskLockEnabled = isChecked))
@@ -222,7 +432,8 @@ fun LauncherAndKioskTab(
                                     showExitPinDialog = true
                                 }
                             },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFFEF4444))
+                            activeColor = Color(0xFFEF4444),
+                            testTag = "kiosk_lock_toggle"
                         )
                     }
 
@@ -248,23 +459,18 @@ fun LauncherAndKioskTab(
                             onClick = { showExitPinDialog = true },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
                             shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1f).testTag("exit_kiosk_button")
+                            modifier = Modifier.weight(1f).testTag("release_lock_task_button")
                         ) {
                             Icon(Icons.Default.LockOpen, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Exit Kiosk (PIN)", fontSize = 12.sp, color = Color.White)
+                            Text("Exit (PIN)", fontSize = 12.sp, color = Color.White)
                         }
-                    }
-
-                    if (actionStatusMessage.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(actionStatusMessage, color = Color(0xFF10B981), fontSize = 12.sp)
                     }
                 }
             }
         }
 
-        // Section 3: Advanced Lockdown Services (Device Admin & Accessibility Watchdog)
+        // Section 3: Device Admin & Accessibility
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -273,136 +479,50 @@ fun LauncherAndKioskTab(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Deep Kiosk Security Privileges", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("Grant system permissions for hardware locking and unwanted app interception.", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.padding(bottom = 12.dp))
+                    Text("System Power & Display Off Authorization", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("Required for physical display off lights & screen lock", color = Color(0xFF94A3B8), fontSize = 11.sp)
 
-                    // Device Administrator Item
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Device Administrator", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isAdminActive) Color(0xFF10B981).copy(alpha = 0.2f) else Color(0xFFEF4444).copy(alpha = 0.2f))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = if (isAdminActive) "ACTIVE" else "NOT ENABLED",
-                                        color = if (isAdminActive) Color(0xFF10B981) else Color(0xFFEF4444),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                            Text("Allows instant screen lock when charger disconnects.", color = Color(0xFF64748B), fontSize = 11.sp)
+                        Column {
+                            Text("Device Admin (Complete Screen Off)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(if (isAdminActive) "✓ Granted (Turns off backlights completely)" else "Not enabled", color = if (isAdminActive) Color(0xFF10B981) else Color(0xFFEF4444), fontSize = 11.sp)
                         }
-
                         if (!isAdminActive && activity != null) {
                             Button(
                                 onClick = { KioskDeviceAdminReceiver.requestDeviceAdmin(activity) },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                shape = RoundedCornerShape(8.dp)
                             ) {
-                                Text("Activate", fontSize = 11.sp)
+                                Text("Grant", fontSize = 11.sp)
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // Accessibility App Blocker Item
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("App Blocker Service", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isAccessibilityActive) Color(0xFF10B981).copy(alpha = 0.2f) else Color(0xFFEF4444).copy(alpha = 0.2f))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = if (isAccessibilityActive) "ACTIVE" else "NOT ENABLED",
-                                        color = if (isAccessibilityActive) Color(0xFF10B981) else Color(0xFFEF4444),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                            Text("Intersects and blocks unauthorized apps immediately.", color = Color(0xFF64748B), fontSize = 11.sp)
+                        Column {
+                            Text("Accessibility Service (App Guard & Lock)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(if (isAccessibilityActive) "✓ Active" else "Not enabled", color = if (isAccessibilityActive) Color(0xFF10B981) else Color(0xFFEF4444), fontSize = 11.sp)
                         }
-
                         if (!isAccessibilityActive) {
                             Button(
                                 onClick = { KioskAccessibilityService.openAccessibilitySettings(context) },
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text("Enable", fontSize = 11.sp)
                             }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Section 4: Data Saver & No Background Data for Unwanted Apps
-        item {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-                border = BorderStroke(1.dp, Color(0xFF334155)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.DataSaverOn, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("No Background Data for Unwanted Apps", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Restrict background cellular/Wi-Fi data usage so unallowed apps cannot consume bandwidth while driving.",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 11.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Button(
-                            onClick = { openDataSaverSettings(context) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1f).testTag("open_data_saver_button")
-                        ) {
-                            Text("Data Saver Settings", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-
-                        Button(
-                            onClick = { openBackgroundDataRestrictions(context) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("App Data Usage", fontSize = 11.sp)
                         }
                     }
                 }
@@ -417,34 +537,19 @@ fun BatteryAndPowerTab(
     telemetry: TelemetryData,
     onUpdateSettings: (KioskSettingsEntity) -> Unit,
     onTestStandby: () -> Unit,
-    onTestEmergency: () -> Unit
+    onSimulateCashNotification: () -> Unit
 ) {
-    var emergencyNumberInput by remember { mutableStateOf(settings.emergencyNumber) }
-    var emergencyContactInput by remember { mutableStateOf(settings.emergencySmsContact) }
+    val context = LocalContext.current
+    val isNotificationAccessGranted = remember {
+        CashNotificationListenerService.isNotificationServiceEnabled(context)
+    }
 
     LazyColumn(
+        modifier = Modifier.fillMaxSize().testTag("battery_power_tab"),
         verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier.fillMaxSize().testTag("battery_power_tab")
+        contentPadding = PaddingValues(bottom = 32.dp)
     ) {
-        // Header
-        item {
-            Column {
-                Text(
-                    text = "Battery & Power Automation",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "Manage charger-based screen state, power button denials, double-tap wake, and 3-press emergency SOS.",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-        }
-
-        // Section 1: Real-time Power Status Card
+        // Section 1: Real-Time Power Status
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -484,7 +589,7 @@ fun BatteryAndPowerTab(
                                 fontSize = 15.sp
                             )
                             Text(
-                                text = if (telemetry.isChargerConnected) "Screen kept ON automatically" else "Auto-off active on disconnect",
+                                text = if (telemetry.isChargerConnected) "Screen kept ON automatically" else "Complete screen-off active on disconnect",
                                 color = Color(0xFF94A3B8),
                                 fontSize = 11.sp
                             )
@@ -501,7 +606,99 @@ fun BatteryAndPowerTab(
             }
         }
 
-        // Section 2: Battery Mode Automation (Charger Connected -> ON, Disconnect -> OFF in 5s)
+        // Section 2: Cash Payment Voice Announcement (Requirement: Read notifaction for cash recieve)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                border = BorderStroke(1.dp, Color(0xFF10B981)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF10B981).copy(alpha = 0.25f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.AttachMoney, contentDescription = null, tint = Color(0xFF34D399), modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("Cash Received Voice Reader", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("Speaks: 'Cash received ₹500 from Rahul'", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                            }
+                        }
+
+                        SmoothToggleSwitch(
+                            checked = settings.cashAnnouncementEnabled,
+                            onCheckedChange = { onUpdateSettings(settings.copy(cashAnnouncementEnabled = it)) },
+                            activeColor = Color(0xFF10B981),
+                            testTag = "cash_announce_toggle"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Text-To-Speech (TTS) Voice", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Reads aloud when payment notification arrives", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                        }
+
+                        SmoothToggleSwitch(
+                            checked = settings.cashTtsEnabled,
+                            onCheckedChange = { onUpdateSettings(settings.copy(cashTtsEnabled = it)) },
+                            activeColor = Color(0xFF10B981),
+                            testTag = "cash_tts_toggle"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = onSimulateCashNotification,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.VolumeUp, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Test Voice Alert", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        if (!isNotificationAccessGranted) {
+                            Button(
+                                onClick = { CashNotificationListenerService.openNotificationAccessSettings(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F172A)),
+                                border = BorderStroke(1.dp, Color(0xFF34D399)),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Allow Access", fontSize = 12.sp, color = Color(0xFF34D399), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 3: Complete Screen Off When Unplugged (Requirement: Display off completely when unplugged, not black shade, complete off lights)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -516,34 +713,31 @@ fun BatteryAndPowerTab(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Automatic Screen Power", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Text("Charger connected: Screen ON\nDisconnect: OFF with delay", color = Color(0xFF94A3B8), fontSize = 11.sp)
+                            Text("Complete Display Off On Unplug", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Turns off display lights completely (100% hardware backlight off, not a black shade)", color = Color(0xFF94A3B8), fontSize = 11.sp)
                         }
 
-                        Switch(
+                        SmoothToggleSwitch(
                             checked = settings.batteryModeEnabled,
-                            onCheckedChange = { isChecked ->
-                                onUpdateSettings(settings.copy(batteryModeEnabled = isChecked))
-                            },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF0284C7))
+                            onCheckedChange = { onUpdateSettings(settings.copy(batteryModeEnabled = it)) },
+                            testTag = "battery_mode_toggle"
                         )
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    Text("Disconnect Turn-Off Delay:", color = Color(0xFFCBD5E1), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("Disconnect countdown delay before complete screen off:", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         listOf(3, 5, 10, 15).forEach { sec ->
-                            val isSelected = settings.disconnectDelaySec == sec
                             FilterChip(
-                                selected = isSelected,
+                                selected = settings.disconnectDelaySec == sec,
                                 onClick = { onUpdateSettings(settings.copy(disconnectDelaySec = sec)) },
-                                label = { Text("${sec}s delay", fontSize = 12.sp) },
+                                label = { Text("${sec}s") },
                                 colors = FilterChipDefaults.filterChipColors(
                                     selectedContainerColor = Color(0xFF0284C7),
                                     selectedLabelColor = Color.White
@@ -551,77 +745,25 @@ fun BatteryAndPowerTab(
                             )
                         }
                     }
-                }
-            }
-        }
-
-        // Section 3: Deny Power Button Wakeup & Double-Tap Wakeup
-        item {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-                border = BorderStroke(1.dp, Color(0xFF334155)),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Wakeup Gesture Rules", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Deny Normal Power Button
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Deny Power Button Wakeup", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                            Text("Denies power button wake while disconnected on battery", color = Color(0xFF94A3B8), fontSize = 11.sp)
-                        }
-
-                        Switch(
-                            checked = settings.denyPowerButtonWakeup,
-                            onCheckedChange = { onUpdateSettings(settings.copy(denyPowerButtonWakeup = it)) },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF0284C7))
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Double Tap Wakeup
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Double-Tap Screen Wakeup", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                            Text("Tap the screen twice to wake up the dashboard", color = Color(0xFF94A3B8), fontSize = 11.sp)
-                        }
-
-                        Switch(
-                            checked = settings.doubleTapWakeupEnabled,
-                            onCheckedChange = { onUpdateSettings(settings.copy(doubleTapWakeupEnabled = it)) },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF0284C7))
-                        )
-                    }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    OutlinedButton(
+                    Button(
                         onClick = onTestStandby,
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-                        modifier = Modifier.fillMaxWidth().testTag("test_standby_button")
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0F172A)),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.TouchApp, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Test Screen Sleep (Try Double-Tap to Wake)", fontSize = 12.sp)
+                        Text("Test Complete Display Off Now", color = Color(0xFF38BDF8), fontSize = 12.sp)
                     }
                 }
             }
         }
 
-        // Section 4: Press Power 3 Times to Wake Display on Battery
+        // Section 4: 3-Press Power Wakeup on Battery
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -644,72 +786,19 @@ fun BatteryAndPowerTab(
                             }
                         }
 
-                        Switch(
+                        SmoothToggleSwitch(
                             checked = settings.power3TimesWakeupEnabled,
                             onCheckedChange = { onUpdateSettings(settings.copy(power3TimesWakeupEnabled = it)) },
-                            colors = SwitchDefaults.colors(checkedTrackColor = Color(0xFF0284C7))
+                            testTag = "power_3times_toggle"
                         )
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
                     Text(
-                        text = "• Normal single power button press is denied on battery to prevent accidental wakeup.\n• Pressing physical power button 3 times in quick succession immediately turns the display ON.",
+                        text = "• Normal single power button press is denied on battery to prevent accidental battery drain.\n• Pressing physical power button 3 times in quick succession immediately turns the display ON.",
                         color = Color(0xFF64748B),
                         fontSize = 11.sp
                     )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Manual Emergency SOS Contact Settings:", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedTextField(
-                        value = emergencyNumberInput,
-                        onValueChange = {
-                            emergencyNumberInput = it
-                            onUpdateSettings(settings.copy(emergencyNumber = it))
-                        },
-                        label = { Text("Emergency Phone Number (911 / 112)") },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = Color(0xFF0F172A),
-                            unfocusedContainerColor = Color(0xFF0F172A),
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        modifier = Modifier.fillMaxWidth().testTag("emergency_number_input")
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    OutlinedTextField(
-                        value = emergencyContactInput,
-                        onValueChange = {
-                            emergencyContactInput = it
-                            onUpdateSettings(settings.copy(emergencySmsContact = it))
-                        },
-                        label = { Text("Emergency SOS SMS Contact (Phone Number)") },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = Color(0xFF0F172A),
-                            unfocusedContainerColor = Color(0xFF0F172A),
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        modifier = Modifier.fillMaxWidth().testTag("emergency_contact_input")
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Button(
-                        onClick = onTestEmergency,
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth().testTag("test_emergency_button")
-                    ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Test Emergency SOS Screen Now", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
                 }
             }
         }
@@ -727,34 +816,5 @@ private fun openHomeLauncherSettings(context: Context) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(fallbackIntent)
-    }
-}
-
-private fun openDataSaverSettings(context: Context) {
-    try {
-        val intent = Intent("android.settings.DATA_SAVER_SETTINGS").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
-    } catch (_: Exception) {
-        val fallback = Intent(Settings.ACTION_WIRELESS_SETTINGS).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(fallback)
-    }
-}
-
-private fun openBackgroundDataRestrictions(context: Context) {
-    try {
-        val intent = Intent(Settings.ACTION_IGNORE_BACKGROUND_DATA_RESTRICTIONS_SETTINGS).apply {
-            data = Uri.parse("package:${context.packageName}")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
-    } catch (_: Exception) {
-        val fallback = Intent(Settings.ACTION_DATA_USAGE_SETTINGS).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(fallback)
     }
 }

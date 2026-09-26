@@ -69,12 +69,13 @@ class SensorAndRoadTracker(
     )
 
     // Distance & Odometer Tracking
+    val odometerPersistence = OdometerPersistenceManager(context)
     private var lastLocationLat: Double? = null
     private var lastLocationLon: Double? = null
-    var dailyRunKm: Double = 0.0
-    var totalOdometerKm: Double = 12450.0
-    var serviceRemainingKm: Double = 4850.0
-    var serviceIntervalKm: Double = 5000.0
+    var dailyRunKm: Double = odometerPersistence.dailyRunKm
+    var totalOdometerKm: Double = odometerPersistence.totalOdometerKm
+    var serviceRemainingKm: Double = odometerPersistence.serviceRemainingKm
+    var serviceIntervalKm: Double = odometerPersistence.serviceIntervalKm
     private var distanceAccumulatedSinceSave: Double = 0.0
     var onOdometerUpdated: ((daily: Double, total: Double, service: Double) -> Unit)? = null
 
@@ -463,10 +464,10 @@ class SensorAndRoadTracker(
 
     fun accumulateTravelDistance(deltaKm: Double) {
         if (deltaKm <= 0.0) return
-        dailyRunKm += deltaKm
-        totalOdometerKm += deltaKm
-        serviceRemainingKm = (serviceRemainingKm - deltaKm).coerceAtLeast(0.0)
-        distanceAccumulatedSinceSave += deltaKm
+        odometerPersistence.addDistance(deltaKm)
+        dailyRunKm = odometerPersistence.dailyRunKm
+        totalOdometerKm = odometerPersistence.totalOdometerKm
+        serviceRemainingKm = odometerPersistence.serviceRemainingKm
 
         _telemetry.update { current ->
             current.copy(
@@ -477,46 +478,45 @@ class SensorAndRoadTracker(
             )
         }
 
-        if (distanceAccumulatedSinceSave >= 0.05) {
-            distanceAccumulatedSinceSave = 0.0
-            onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
-        }
+        onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
     }
 
     fun setOdometerState(daily: Double, total: Double, remaining: Double, interval: Double) {
-        dailyRunKm = daily
-        totalOdometerKm = total
-        serviceRemainingKm = remaining
-        serviceIntervalKm = interval
+        odometerPersistence.syncFromDatabase(daily, total, remaining, interval, "")
+        dailyRunKm = odometerPersistence.dailyRunKm
+        totalOdometerKm = odometerPersistence.totalOdometerKm
+        serviceRemainingKm = odometerPersistence.serviceRemainingKm
+        serviceIntervalKm = odometerPersistence.serviceIntervalKm
         _telemetry.update { current ->
             current.copy(
-                dailyRunKm = daily,
-                totalOdometerKm = total,
-                serviceRemainingKm = remaining,
-                serviceIntervalKm = interval
+                dailyRunKm = dailyRunKm,
+                totalOdometerKm = totalOdometerKm,
+                serviceRemainingKm = serviceRemainingKm,
+                serviceIntervalKm = serviceIntervalKm
             )
         }
     }
 
     fun resetDailyKm() {
+        odometerPersistence.resetDaily()
         dailyRunKm = 0.0
         _telemetry.update { it.copy(dailyRunKm = 0.0) }
         onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
     }
 
     fun resetServiceCountdown() {
+        odometerPersistence.resetServiceCountdown()
         serviceRemainingKm = serviceIntervalKm
         _telemetry.update { it.copy(serviceRemainingKm = serviceIntervalKm) }
         onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
     }
 
     fun updateServiceInterval(newInterval: Double) {
-        serviceIntervalKm = newInterval
-        if (serviceRemainingKm > newInterval) {
-            serviceRemainingKm = newInterval
-        }
+        odometerPersistence.setServiceInterval(newInterval)
+        serviceIntervalKm = odometerPersistence.serviceIntervalKm
+        serviceRemainingKm = odometerPersistence.serviceRemainingKm
         _telemetry.update {
-            it.copy(serviceIntervalKm = newInterval, serviceRemainingKm = serviceRemainingKm)
+            it.copy(serviceIntervalKm = serviceIntervalKm, serviceRemainingKm = serviceRemainingKm)
         }
         onOdometerUpdated?.invoke(dailyRunKm, totalOdometerKm, serviceRemainingKm)
     }

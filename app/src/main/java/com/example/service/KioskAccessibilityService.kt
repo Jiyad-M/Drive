@@ -3,6 +3,7 @@ package com.example.service
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -103,6 +104,13 @@ class KioskAccessibilityService : AccessibilityService() {
         fun updateAllowedPackages(packages: Set<String>, lockActive: Boolean) {
             allowedPackagesSet = packages
             isKioskLockActive = lockActive
+        }
+
+        fun lockDeviceScreen(): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                return instance?.performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN) ?: false
+            }
+            return false
         }
     }
 }
