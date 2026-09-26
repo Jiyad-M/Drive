@@ -112,5 +112,16 @@ class KioskAccessibilityService : AccessibilityService() {
             }
             return false
         }
+
+        fun openRecentsMultitasking(): Boolean {
+            return instance?.performGlobalAction(GLOBAL_ACTION_RECENTS) ?: false
+        }
+
+        fun openSplitScreen(): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                return instance?.performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN) ?: false
+            }
+            return false
+        }
     }
 }

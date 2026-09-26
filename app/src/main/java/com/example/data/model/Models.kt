@@ -10,7 +10,12 @@ data class AllowedAppEntity(
     val activityName: String = "",
     val appName: String,
     val isAllowed: Boolean = true,
-    val orderIndex: Int = 0
+    val orderIndex: Int = 0,
+    val isAppPair: Boolean = false,
+    val secondaryPackageName: String = "",
+    val secondaryAppName: String = "",
+    val shortcutIntentUri: String = "",
+    val shortcutId: String = ""
 )
 
 @Entity(tableName = "road_obstacles")
